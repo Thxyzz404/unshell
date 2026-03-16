@@ -1,0 +1,468 @@
+#!/bin/env bash
+
+ulimit -s unlimited >/dev/null 2>&1
+
+show_usage_unshell() {
+	printf "%s - Deobfuscate any shell scripts with multiple methods
+  Usage: %s [OPTIONS] [FILE]
+  Usage: %s [OPTIONS] [DIR]
+
+  Options:
+    -h, --help
+      print this message
+    -f, --file [FILE]
+      Scripts you wanted to deobfuscate, multi input is supported
+    -r, --recursive [DIR]
+      Recursively find and deobfuscate all files in the specified directory
+    -v, --verbose
+      Be verbose
+    -d, --execve-delay [SECOND]
+      Set custom execve delay time in seconds for SHC and SSC encryption
+    -U, --update
+      Update the script
+
+  Example usages:
+    %s -f install.sh menu.sh
+    %s -v -f /system/bin/gaming_script
+    %s -d 6.018 -f ./VTK
+    %s -r .
+    \n" "${0##*/}" "${0##*/}" "${0##*/}" "${0##*/}" "${0##*/}" "${0##*/}" "${0##*/}"
+	exit 0
+}
+
+update_script() {
+	temp="$HOME/unshell.temp"
+	which_is_unshell=$(which unshell)
+
+	if [ -z "$which_is_unshell" ]; then
+		echo "'which' is not installed, please install it!"
+		exit 1
+	fi
+
+	# Download the latest version
+	if ! curl -Lo "$temp" https://github.com/Thxyzz404/unshell/raw/main/unshell; then
+		rm -f "$temp"
+		echo "error: failed to download update script"
+		exit 1
+	fi
+
+	# Ensure the current binary is removed only after successful download
+	if rm -f "$which_is_unshell" && mv "$temp" "$which_is_unshell"; then
+		chmod +x "$which_is_unshell"
+		echo "Updated successfully"
+		exit 0
+	else
+		echo "error: failed to update"
+		exit 1
+	fi
+}
+
+remove_comments() {
+	if ! hash shfmt; then
+		echo "error: environment has missing dependencies"
+		return 127
+	fi
+	shfmt -mn ./$filename.temp1.sh >./$filename.temp2.sh
+	mv ./$filename.temp2.sh ./$filename.temp1.sh
+}
+
+decrypt_ricrypt() {
+	if ! hash strace; then
+		echo "error: environment has missing dependencies"
+		return 127
+	fi
+	spath=$(echo $PATH | cut -d: -f1)
+	cp ./$filename.temp1.sh $spath/$filename.temp1.sh
+	chmod +x $spath/$filename.temp1.sh
+
+	strace -s 50000 -f -e trace=execve $filename.temp1.sh 2>&1 |
+		while read -r line; do
+			if echo "$line" | grep -q "eval"; then
+				pkill $filename.temp1.sh
+				echo $line | grep -oP 'eval.*?"\K[^"]+' | tr -d '\' 2>/dev/null | base64 -d >./$filename.temp2.sh
+				break
+			fi
+		done
+
+	rm -f $spath/$filename.temp1.sh
+	if [ -s ./$filename.temp2.sh ]; then
+		mv ./$filename.temp2.sh ./$filename.temp1.sh
+	else
+		rm ./$filename.temp2.sh ./$filename.temp1.sh
+	fi
+}
+
+decrypt_ssc() {
+	spath=$(echo $PATH | cut -d: -f1)
+	cp ./$filename.temp1.sh $spath/$filename.temp1.sh
+	chmod +x $spath/$filename.temp1.sh
+
+	if [ -z $EXECVE_DELAY ]; then
+		for sec in {10..28}; do
+			$filename.temp1.sh &
+			child=$!
+			sleep 0.0"$sec"
+			kill -STOP $child
+			cat /proc/$child/fd/3 >"./$filename.temp2.sh"
+			kill -TERM $child
+
+			if [ -s ./$filename.temp2.sh ]; then
+				break
+			fi
+		done
+	else
+		$filename.temp1.sh &
+		child=$!
+		sleep $EXECVE_DELAY
+		kill -STOP $child
+		cat /proc/$child/fd/3 >"./$filename.temp2.sh"
+		kill -TERM $child
+	fi
+
+	rm -f $spath/$filename.temp1.sh
+	if [ -s ./$filename.temp2.sh ]; then
+		if ! grep -q '#!/' "./$filename.temp2.sh"; then
+			echo "notice: Output script maybe truncated"
+		fi
+
+		mv ./$filename.temp2.sh ./$filename.temp1.sh
+	else
+		rm ./$filename.temp2.sh ./$filename.temp1.sh
+	fi
+}
+
+decrypt_shc() {
+	spath=$(echo $PATH | cut -d: -f1)
+	cp ./$filename.temp1.sh $spath/$filename.temp1.sh
+	chmod +x $spath/$filename.temp1.sh
+
+	if [ -z $EXECVE_DELAY ]; then
+		for sec in {1..7}; do
+			$filename.temp1.sh &
+			child=$!
+			sleep 0.0"$sec"
+			kill -STOP $child
+			cat /proc/$child/cmdline | sed 's/.*\(#!\)/\1/' >"./$filename.temp2.sh"
+			kill -TERM $child
+
+			if grep -q '#!/' "./$filename.temp2.sh"; then
+				break
+			fi
+		done
+	else
+		$filename.temp1.sh &
+		child=$!
+		sleep $EXECVE_DELAY
+		kill -STOP $child
+		cat /proc/$child/cmdline | sed 's/.*\(#!\)/\1/' >"./$filename.temp2.sh"
+		kill -TERM $child
+	fi
+
+	rm -f $spath/$filename.temp1.sh
+	if grep -q '#!/' "./$filename.temp2.sh"; then
+		mv ./$filename.temp2.sh ./$filename.temp1.sh
+	else
+		rm ./$filename.temp2.sh ./$filename.temp1.sh
+	fi
+}
+
+decrypt_bashrock() {
+	sed 's/eval "$x";/echo "$x";/g' ./$filename.temp1.sh >./$filename.temp2.sh
+	bash ./$filename.temp2.sh >./$filename.temp1.sh
+	rm ./$filename.temp2.sh
+}
+
+decrypt_bashprotector() {
+	sed 's/\beval\b/echo/g' ./$filename.temp1.sh >./$filename.temp2.sh
+	bash ./$filename.temp2.sh | bash >./$filename.temp1.sh
+	rm ./$filename.temp2.sh
+}
+
+decrypt_bashobsf() {
+	sed 's/eval "\$/echo "\$/g; s/\[ "$(id -u)" -ne 2000 \]/! true/' ./$filename.temp1.sh >./$filename.temp2.sh
+	bash ./$filename.temp2.sh >./$filename.temp1.sh
+	rm ./$filename.temp2.sh
+}
+
+decrypt_tpp() {
+	if ! hash shfmt; then
+		echo "error: environment has missing dependencies"
+		return 127
+	fi
+	shfmt -mn -w ./$filename.temp1.sh
+	sed '/<<EOF/,/EOF/d' ./$filename.temp1.sh >./$filename.temp2.sh
+	mv ./$filename.temp2.sh ./$filename.temp1.sh
+	sed 's/eval "\$/echo "\$/g' ./$filename.temp1.sh >./$filename.temp2.sh
+	bash ./$filename.temp2.sh >./$filename.temp1.sh
+	rm ./$filename.temp2.sh
+}
+
+decrypt_base64() {
+	sed 's/base64 -d | [a-z\/]*sh/base64 -d/; s/\[ "$(id -u)" -ne 2000 \]/! true/' ./$filename.temp1.sh >./$filename.temp2.sh
+	bash ./$filename.temp2.sh >./$filename.temp1.sh
+	rm ./$filename.temp2.sh
+}
+
+decrypt_bzip2() {
+	skip=$(($(sed -n 2p ./$filename.temp1.sh | awk -F'=' '{print $2}') - 1))
+	sed 1,${skip}d ./$filename.temp1.sh >./$filename.temp2.sh
+	bzip2 -cd ./$filename.temp2.sh >./$filename.temp1.sh
+	rm ./$filename.temp2.sh
+}
+
+decrypt_axeron() {
+	cat <<"EOF" >./temp_functions.sh
+rozaq() {
+	if [ "$1" = "-d" ] && [ -n "$2" ]; then
+		[[ "${2:0:3}" = "r17" ]] && echo "${2:3}" | tr R-ZA-Qr-za-q A-Za-z | base64 -d || echo "$2"
+	else
+		echo "r17$(echo -n "$1" | base64 | tr A-Za-z R-ZA-Qr-za-q)"
+	fi
+}
+
+storm() {
+	obsf_link=$(echo $2)
+	rozaq -d $obsf_link
+}
+EOF
+
+	REP_FUNCTION="./temp_functions.sh"
+	sed "s|source \$FUNCTION|source $REP_FUNCTION|; s/\[ \"\$(id -u)\" -ne 2000 \]/! true/" ./$filename.temp1.sh >./$filename.temp2.sh
+	obsf_link=$(bash ./$filename.temp2.sh)
+	echo "Obfuscated link: $obsf_link"
+	echo "Downloading script..."
+	rm $REP_FUNCTION
+	curl -Lo ./$filename.temp1.sh $obsf_link
+	# Don't use '||' here, just don't
+	[ $? -gt 0 ] && rm ./$filename.temp1.sh && echo "error: unable to download axeron script." && return 1
+}
+
+decrypt_eval_base64() {
+	sed 's/eval "\$/echo "\$/g; s/\[ "$(id -u)" -ne 2000 \]/! true/' ./$filename.temp1.sh >./$filename.temp2.sh
+	bash ./$filename.temp2.sh >./$filename.temp1.sh
+	rm ./$filename.temp2.sh
+}
+
+# "kenapa kesini? mau liat isi kode modul putraxitersz ya?"
+# Ya dong puki lu kira ngapain cok?
+decrypt_putraxitersz() {
+	sed 's/.gz" -c | sh/\.gz" -c/g; s|/data/local/tmp/|./|g' ./$filename.temp1.sh >./$filename.temp2.sh
+	bash ./$filename.temp2.sh >./$filename.temp1.sh
+	rm ./$filename.temp2.sh
+}
+
+decrypt_kaminarienc() {
+        _random=$(tr -dc 'A-Za-z0-9' < /dev/random | head -c 30)
+	chmod +x $filename.temp1.sh
+
+    # patch
+	sed -i "s|/data/local/tmp/.cache_script.sh|./$_random|g" \
+	   $filename.temp1.sh
+
+    ./$filename.temp1.sh & child=$!
+	cat ./$_random >"./$filename.temp2.sh"
+	kill -TERM $child
+
+	rm -f ./$_random
+
+	if [ $(wc -c <"./$filename.temp2.sh") -gt 1 ]; then
+		mv ./$filename.temp2.sh ./$filename.temp1.sh
+	else
+		rm ./$filename.temp2.sh ./$filename.temp1.sh
+	fi
+}
+
+init_dec() {
+	[ $VERBOSE -eq 1 ] && set -x
+	while true; do
+		if [ ! -f ./$filename.temp1.sh ]; then
+			break
+		elif grep -q '$RzE' ./$filename.temp1.sh; then
+			counter=$((counter + 1))
+			echo "Layer $counter: bashrock"
+			decrypt_bashrock
+			PASSED_LOOP=1
+		elif grep -q 'Tx=Eds' ./$filename.temp1.sh; then
+			counter=$((counter + 1))
+			echo "Layer $counter: bashprotector"
+			decrypt_bashprotector
+			PASSED_LOOP=1
+		elif grep -q 'z=.*;.*z=.*;' ./$filename.temp1.sh; then
+			counter=$((counter + 1))
+			echo "Layer $counter: bash-obfuscate"
+			decrypt_bashobsf
+			PASSED_LOOP=1
+		elif grep -q 'dec_.*=$(echo\s"$enc"' ./$filename.temp1.sh && ! grep -q 'while\sread' ./$filename.temp1.sh; then
+			counter=$((counter + 1))
+			echo "Layer $counter: TPP Tool"
+			decrypt_tpp
+			PASSED_LOOP=1
+		elif grep -q "Strong_Encryptor_By_BOYZGAMES" ./$filename.temp1.sh && ! grep -q 'ro.serialno' ./$filename.temp1.sh; then
+			counter=$((counter + 1))
+			echo "Layer $counter: Strong_Encryptor_By_BOYZGAMES (base64)"
+			decrypt_eval_base64
+			PASSED_LOOP=1
+		elif grep -q 'storm\s-x' ./$filename.temp1.sh; then
+			counter=$((counter + 1))
+			echo "Layer $counter: Axeron online module"
+			decrypt_axeron
+			PASSED_LOOP=1
+		elif grep -q '/bin/bzip2\s-cd' ./$filename.temp1.sh && grep -q 'skip=23' ./$filename.temp1.sh; then
+			counter=$((counter + 1))
+			echo "Layer $counter: bzip2"
+			decrypt_bzip2
+			PASSED_LOOP=1
+		elif grep -q 'base64 -d | [a-z\/]*sh$' ./$filename.temp1.sh; then
+			counter=$((counter + 1))
+			echo "Layer $counter: base64"
+			decrypt_base64
+			PASSED_LOOP=1
+		elif grep -q 'modul putraxitersz' ./$filename.temp1.sh; then
+			counter=$((counter + 1))
+			echo "Layer $counter: putraxitersz"
+			decrypt_putraxitersz
+			PASSED_LOOP=1
+		elif [ $(grep -c '^#' ./$filename.temp1.sh) -gt 180 ]; then
+			counter=$((counter + 1))
+			echo "Layer $counter: Extreme comment/editor EOF trick"
+			remove_comments
+			PASSED_LOOP=1
+		elif strings ./$filename.temp1.sh | grep -q 'SSC_ARGV0'; then
+			counter=$((counter + 1))
+			echo "Layer $counter: ssc"
+			decrypt_ssc
+			PASSED_LOOP=1
+		elif strings ./$filename.temp1.sh | grep -q 'E:\sneither\sargv\[0\]\snor\s\$_\sworks\.'; then
+			counter=$((counter + 1))
+			echo "Layer $counter: shc"
+			decrypt_shc
+			PASSED_LOOP=1
+		elif strings ./$filename.temp1.sh | grep -q 'sh-cFailed'; then
+			counter=$((counter + 1))
+			echo "Layer $counter: Ri-crypt"
+			decrypt_ricrypt
+			PASSED_LOOP=1
+		elif strings ./$filename.temp1.sh | grep -q "/data/local/tmp/.cache_script.sh"; then
+			counter=$((counter + 1))
+			echo "Layer $counter: Kaminari-enc"
+			decrypt_kaminarienc
+			PASSED_LOOP=1
+		else
+			[ $PASSED_LOOP -eq 0 ] && rm ./$filename.temp1.sh && echo "error: uknown patterns, deobfuscation is not supported."
+			break
+		fi
+	done
+
+	if [ ! -s ./$filename.temp1.sh ]; then
+		[ $VERBOSE -eq 1 ] && set +x
+		echo "Failed to deobfuscate $1"
+		remove_temp
+		return 1
+	fi
+
+	[ $VERBOSE -eq 1 ] && set +x
+	mv ./$filename.temp1.sh ./$filename.dec.sh
+	echo "./$filename.dec.sh unshelled"
+	remove_temp
+}
+
+remove_temp() {
+	rm -f ./$filename.temp*.sh
+	counter=0
+}
+
+process_files() {
+	for file in "$@"; do
+		if [ ! -f "$file" ]; then
+			echo "error: file $file does not exist!"
+		else
+			PASSED_LOOP=0
+			filename=$(basename "$file")
+			cp "$file" "./$filename.temp1.sh"
+			echo "Deobfuscating $file → ./$filename.dec.sh"
+			init_dec "$file"
+		fi
+	done
+}
+
+process_recursive() {
+	find "$1" -maxdepth 1 -type f | while IFS= read -r file; do
+		process_files "$file"
+	done
+}
+
+if ! hash strings curl; then
+	echo "error: environment has missing dependencies"
+	exit 1
+fi
+
+RECURSIVE=0
+FILES=0
+VERBOSE=0
+
+while [[ $# -gt 0 ]]; do
+	case $1 in
+	-h | --help)
+		show_usage_unshell
+		exit 0
+		;;
+	-v | --verbose)
+		VERBOSE=1
+		shift
+		;;
+	-d | --execve-delay)
+		shift
+		if [[ $1 =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+			EXECVE_DELAY=$1
+		else
+			echo -e "error: execve delay MUST be a positive integer or decimal number!\nFor help, type: 'unshell --help'."
+			exit 1
+		fi
+		shift
+		;;
+	-U | --update)
+		update_script
+		shift
+		;;
+	-r | --recursive)
+		RECURSIVE=1
+		shift
+		break
+		;;
+	-f | --file)
+		FILES=1
+		shift
+		break
+		;;
+	-*)
+		echo -e "error: bad option\nFor help, type: 'unshell --help'."
+		exit 1
+		;;
+	*) shift ;;
+	esac
+done
+
+if [[ "$RECURSIVE" -eq 1 && "$FILES" -eq 1 ]]; then
+	echo -e "error: -r and -f option cannot coexist!\nFor help, type: 'unshell --help'."
+	exit 1
+elif [[ "$RECURSIVE" -eq 0 && "$FILES" -eq 0 ]]; then
+	echo -e "error: the following arguments are required: -f, --file or -r, --recursive\nFor help, type: 'unshell --help'."
+	exit 1
+fi
+
+if [ -z "$1" ]; then
+	echo -e "error: no input file or directory\nFor help, type: 'unshell --help'."
+	exit 1
+fi
+
+if [ "$RECURSIVE" -eq 1 ]; then
+	for dir in "$@"; do
+		if [ -d "$dir" ]; then
+			process_recursive "$dir"
+		else
+			echo "error: $dir is not a directory!"
+		fi
+	done
+else
+	process_files "$@"
+fi
